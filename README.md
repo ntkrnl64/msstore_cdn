@@ -1,6 +1,6 @@
 # `msstore_cdn`
 
-A simple util that forces Microsoft Store to use the best CDN possible.
+A simple util that forces Microsoft Store / Windows Update to use the best CDN possible.
 
 ## CDN Sources
 
