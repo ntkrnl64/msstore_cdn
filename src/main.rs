@@ -96,6 +96,10 @@ struct Args {
     #[arg(long)]
     dry_run: bool,
 
+    /// Force GUI
+    #[arg(short, long, default_value_t = false)]
+    gui: bool,
+
     /// Enable debug logging
     #[arg(long)]
     debug: bool,
@@ -132,18 +136,26 @@ fn main() -> Result<()> {
     #[cfg(not(target_os = "windows"))]
     let double_clicked = false;
 
-    if has_args || !double_clicked {
-        run_cli_mode()
+    let args = Args::parse();
+
+    let use_gui = (!has_args && double_clicked) || args.gui;
+
+    if use_gui {
+        run_gui_or_fallback()
     } else {
-        #[cfg(target_os = "windows")]
-        {
-            run_gui_mode()
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            println!("GUI mode is only available on Windows.");
-            run_cli_mode()
-        }
+        run_cli_mode()
+    }
+}
+
+fn run_gui_or_fallback() -> Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        run_gui_mode()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        println!("GUI mode is only available on Windows.");
+        run_cli_mode()
     }
 }
 
@@ -434,8 +446,20 @@ async fn core_logic(
         }};
     }
 
+    let system_hosts_path = get_hosts_file_path();
+    let input_path = args.input.as_deref().unwrap_or(&system_hosts_path);
+    let output_path = args.output.as_deref().unwrap_or(input_path);
+
+    // Logging paths (useful for debug)
     if args.dry_run {
         log_msg!("DRY RUN MODE: No files will be modified.");
+    }
+
+    // Only log paths if they deviate from system default or debug is on,
+    // but here we can just log them to confirm user choice.
+    if args.debug {
+        debug!("Input Path: {:?}", input_path);
+        debug!("Output Path: {:?}", output_path);
     }
 
     log_msg!("Resolving final IP for: {} ...", source_domain);
@@ -466,10 +490,6 @@ async fn core_logic(
         .ok_or_else(|| eyre::eyre!("No IP address found for {}", source_domain))?;
 
     log_msg!("Selected IP: {}", target_ip);
-
-    let system_hosts_path = get_hosts_file_path();
-    let input_path = args.input.as_deref().unwrap_or(&system_hosts_path);
-    let output_path = args.output.as_deref().unwrap_or(input_path);
 
     // Call update logic
     match update_hosts_file(
@@ -665,7 +685,7 @@ fn enable_dpi_awareness() {
 #[cfg(target_os = "windows")]
 #[derive(Default, NwgUi)]
 pub struct HostsApp {
-    #[nwg_control(size: (600, 480), position: (300, 300), title: "Microsoft Store Hosts Optimizer", flags: "WINDOW|VISIBLE|RESIZABLE")]
+    #[nwg_control(size: (600, 550), position: (300, 300), title: "Microsoft Store Hosts Optimizer", flags: "WINDOW|VISIBLE|RESIZABLE")]
     #[nwg_events( OnWindowClose: [HostsApp::on_exit], OnInit: [HostsApp::init_ui] )]
     window: nwg::Window,
 
@@ -691,7 +711,6 @@ pub struct HostsApp {
     combo_source: nwg::ComboBox<String>,
 
     // Row 2
-    // Layout: [Dry Run] [Auto Select] [Use Proxy]
     #[nwg_control(text: "Dry Run", check_state: nwg::CheckBoxState::Unchecked)]
     #[nwg_layout_item(layout: layout, col: 0, row: 2)]
     check_dry: nwg::CheckBox,
@@ -705,19 +724,55 @@ pub struct HostsApp {
     #[nwg_layout_item(layout: layout, col: 2, row: 2)]
     check_proxy: nwg::CheckBox,
 
-    // Row 3
+    // Row 3: Input File
+    #[nwg_control(text: "Input File:", position: (0, 0))]
+    #[nwg_layout_item(layout: layout, col: 0, row: 3)]
+    label_input: nwg::Label,
+
+    #[nwg_control(text: "", readonly: false)]
+    #[nwg_layout_item(layout: layout, col: 1, row: 3)]
+    input_input_path: nwg::TextInput,
+
+    #[nwg_control(text: "...", size: (10,22))]
+    #[nwg_layout_item(layout: layout, col: 2, row: 3)]
+    #[nwg_events( OnButtonClick: [HostsApp::on_browse_input] )]
+    btn_browse_input: nwg::Button,
+
+    // Row 4: Output File
+    #[nwg_control(text: "Output File:", position: (0, 0))]
+    #[nwg_layout_item(layout: layout, col: 0, row: 4)]
+    label_output: nwg::Label,
+
+    #[nwg_control(text: "", readonly: false)]
+    #[nwg_layout_item(layout: layout, col: 1, row: 4)]
+    input_output_path: nwg::TextInput,
+
+    #[nwg_control(text: "...", size: (10,22))]
+    #[nwg_layout_item(layout: layout, col: 2, row: 4)]
+    #[nwg_events( OnButtonClick: [HostsApp::on_browse_output] )]
+    btn_browse_output: nwg::Button,
+
+    // Row 5
     #[nwg_control(text: "Update Hosts File", flags: "VISIBLE")]
-    #[nwg_layout_item(layout: layout, col: 1, row: 3, col_span: 2)]
+    #[nwg_layout_item(layout: layout, col: 1, row: 5, col_span: 2)]
     #[nwg_events( OnButtonClick: [HostsApp::on_click_update] )]
     btn_update: nwg::Button,
 
+    // Row 6+
     #[nwg_control(text: "Ready...", flags: "VISIBLE|VSCROLL|AUTOVSCROLL", readonly: true)]
-    #[nwg_layout_item(layout: layout, col: 0, row: 4, col_span: 3, row_span: 5)]
+    #[nwg_layout_item(layout: layout, col: 0, row: 6, col_span: 3, row_span: 5)]
     log_box: nwg::TextBox,
 
     #[nwg_control]
     #[nwg_events( OnNotice: [HostsApp::on_update_complete] )]
     notice: nwg::Notice,
+
+    // File Dialogs
+    #[nwg_resource(title: "Select Input Hosts File", action: nwg::FileDialogAction::Open, filters: "All (*.*)")]
+    dialog_input: nwg::FileDialog,
+
+    #[nwg_resource(title: "Select Output Hosts File", action: nwg::FileDialogAction::Save, filters: "All (*.*)")]
+    dialog_output: nwg::FileDialog,
 
     logs: Arc<Mutex<String>>,
 }
@@ -733,12 +788,36 @@ impl HostsApp {
         self.combo_source.set_collection(names);
         self.combo_source.set_selection(Some(0));
         self.on_auto_check(); // Set initial state
+
+        // Initialize path fields with system default
+        let default_path = get_hosts_file_path();
+        if let Some(path_str) = default_path.to_str() {
+            self.input_input_path.set_text(path_str);
+            self.input_output_path.set_text(path_str);
+        }
     }
 
     fn on_auto_check(&self) {
         // Toggle combo box enabled state based on auto check
         let is_auto = self.check_auto.check_state() == nwg::CheckBoxState::Checked;
         self.combo_source.set_enabled(!is_auto);
+    }
+
+    fn on_browse_input(&self) {
+        if self.dialog_input.run(Some(&self.window)) {
+            if let Ok(file_name) = self.dialog_input.get_selected_item() {
+                self.input_input_path.set_text(&file_name.to_string_lossy());
+            }
+        }
+    }
+
+    fn on_browse_output(&self) {
+        if self.dialog_output.run(Some(&self.window)) {
+            if let Ok(file_name) = self.dialog_output.get_selected_item() {
+                self.input_output_path
+                    .set_text(&file_name.to_string_lossy());
+            }
+        }
     }
 
     fn on_click_update(&self) {
@@ -749,8 +828,22 @@ impl HostsApp {
         let is_auto = self.check_auto.check_state() == nwg::CheckBoxState::Checked;
         let dry_run = self.check_dry.check_state() == nwg::CheckBoxState::Checked;
         let use_proxy = self.check_proxy.check_state() == nwg::CheckBoxState::Checked;
-
         let source_idx = self.combo_source.selection().unwrap_or(0);
+
+        // Paths
+        let in_txt = self.input_input_path.text();
+        let out_txt = self.input_output_path.text();
+
+        let input_opt = if in_txt.trim().is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(in_txt.trim()))
+        };
+        let output_opt = if out_txt.trim().is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(out_txt.trim()))
+        };
 
         // Reset Logs
         if let Ok(mut logs) = self.logs.lock() {
@@ -769,8 +862,9 @@ impl HostsApp {
             let args = Args {
                 dry_run,
                 debug: true,
-                input: None,
-                output: None,
+                gui: true,
+                input: input_opt,
+                output: output_opt,
                 source_index: source_idx,
                 auto: is_auto,
                 use_system_proxy: use_proxy,
