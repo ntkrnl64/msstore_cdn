@@ -6,7 +6,7 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, instrument};
 
 #[cfg(target_os = "windows")]
 use native_windows_derive::NwgUi;
@@ -115,6 +115,10 @@ struct Args {
     /// Automatically select the fastest source
     #[arg(long, default_value_t = true)]
     auto: bool,
+
+    /// Enable system proxy usage (Default: false)
+    #[arg(long, default_value_t = false)]
+    use_system_proxy: bool,
 }
 
 fn main() -> Result<()> {
@@ -167,7 +171,8 @@ fn init_logging(debug_mode: bool) {
 
 async fn async_main(mut args: Args, gui_logger: Option<Arc<Mutex<String>>>) -> Result<()> {
     let selected_source_domain = if args.auto {
-        match run_auto_selection(gui_logger.clone()).await {
+        // Pass the proxy flag to the selection logic
+        match run_auto_selection(gui_logger.clone(), args.use_system_proxy).await {
             Ok(domain) => {
                 info!("Auto-selection winner: {}", domain);
                 domain
@@ -198,7 +203,10 @@ async fn async_main(mut args: Args, gui_logger: Option<Arc<Mutex<String>>>) -> R
 }
 
 /// 自动选择逻辑
-async fn run_auto_selection(gui_logger: Option<Arc<Mutex<String>>>) -> Result<String> {
+async fn run_auto_selection(
+    gui_logger: Option<Arc<Mutex<String>>>,
+    use_system_proxy: bool,
+) -> Result<String> {
     macro_rules! log_msg {
         ($($arg:tt)*) => {{
             let msg = format!($($arg)*);
@@ -213,15 +221,26 @@ async fn run_auto_selection(gui_logger: Option<Arc<Mutex<String>>>) -> Result<St
     }
 
     log_msg!("Starting auto-selection...");
+    if use_system_proxy {
+        log_msg!("Network: Using System Proxy");
+    } else {
+        log_msg!("Network: Direct Connection (No Proxy)");
+    }
     log_msg!("Fetching file links from API...");
 
-    // 1. Fetch Links
-    let client = reqwest::Client::builder()
+    // 1. Configure Client
+    let mut client_builder = reqwest::Client::builder()
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-        // 增加超时设置，防止 API 卡死
-        .timeout(Duration::from_secs(10))
-        .build()?;
+        .timeout(Duration::from_secs(10));
 
+    // Disable proxy if not requested
+    if !use_system_proxy {
+        client_builder = client_builder.no_proxy();
+    }
+
+    let client = client_builder.build()?;
+
+    // 2. Fetch Links
     let payload = ApiRequest {
         productInput: "9WZDNCRD29V9".to_string(),
         market: "US".to_string(),
@@ -241,7 +260,7 @@ async fn run_auto_selection(gui_logger: Option<Arc<Mutex<String>>>) -> Result<St
 
     let api_data: ApiResponse = resp.json().await.context("Failed to parse API response")?;
 
-    // 2. Select a test file
+    // 3. Select a test file
     let test_package = api_data
         .appx_packages
         .iter()
@@ -261,7 +280,7 @@ async fn run_auto_selection(gui_logger: Option<Arc<Mutex<String>>>) -> Result<St
         format!("{}?{}", path, query)
     };
 
-    // 3. Benchmark in parallel
+    // 4. Benchmark in parallel
     log_msg!("Benchmarking {} sources...", DNS_SOURCES.len());
 
     let futures = DNS_SOURCES.iter().map(|source| {
@@ -326,7 +345,6 @@ async fn run_auto_selection(gui_logger: Option<Arc<Mutex<String>>>) -> Result<St
                             let size = bytes.len() as u64;
 
                             // Check size consistency
-                            // 如果 API 返回的 Content-Length 存在，则校验
                             if size == 0 {
                                 debug!("[{}] Downloaded 0 bytes.", source_name);
                                 return (source_name, source_domain, None, 0);
@@ -369,7 +387,7 @@ async fn run_auto_selection(gui_logger: Option<Arc<Mutex<String>>>) -> Result<St
         .collect()
         .await;
 
-    // 4. Analyze results
+    // 5. Analyze results
     let mut valid_results: Vec<_> = results
         .into_iter()
         .filter_map(|(name, domain, duration, size)| {
@@ -673,15 +691,19 @@ pub struct HostsApp {
     combo_source: nwg::ComboBox<String>,
 
     // Row 2
+    // Layout: [Dry Run] [Auto Select] [Use Proxy]
     #[nwg_control(text: "Dry Run", check_state: nwg::CheckBoxState::Unchecked)]
-    #[nwg_layout_item(layout: layout, col: 1, row: 2)]
+    #[nwg_layout_item(layout: layout, col: 0, row: 2)]
     check_dry: nwg::CheckBox,
 
-    // Auto Select Checkbox
     #[nwg_control(text: "Auto Select", check_state: nwg::CheckBoxState::Checked)]
-    #[nwg_layout_item(layout: layout, col: 2, row: 2)]
+    #[nwg_layout_item(layout: layout, col: 1, row: 2)]
     #[nwg_events( OnButtonClick: [HostsApp::on_auto_check] )]
     check_auto: nwg::CheckBox,
+
+    #[nwg_control(text: "Use Proxy", check_state: nwg::CheckBoxState::Unchecked)]
+    #[nwg_layout_item(layout: layout, col: 2, row: 2)]
+    check_proxy: nwg::CheckBox,
 
     // Row 3
     #[nwg_control(text: "Update Hosts File", flags: "VISIBLE")]
@@ -710,6 +732,7 @@ impl HostsApp {
         let names: Vec<String> = DNS_SOURCES.iter().map(|s| s.name.to_string()).collect();
         self.combo_source.set_collection(names);
         self.combo_source.set_selection(Some(0));
+        self.on_auto_check(); // Set initial state
     }
 
     fn on_auto_check(&self) {
@@ -725,6 +748,7 @@ impl HostsApp {
         // UI Parameters
         let is_auto = self.check_auto.check_state() == nwg::CheckBoxState::Checked;
         let dry_run = self.check_dry.check_state() == nwg::CheckBoxState::Checked;
+        let use_proxy = self.check_proxy.check_state() == nwg::CheckBoxState::Checked;
 
         let source_idx = self.combo_source.selection().unwrap_or(0);
 
@@ -749,6 +773,7 @@ impl HostsApp {
                 output: None,
                 source_index: source_idx,
                 auto: is_auto,
+                use_system_proxy: use_proxy,
             };
 
             let res = rt.block_on(async_main(args, Some(logs_handle.clone())));
